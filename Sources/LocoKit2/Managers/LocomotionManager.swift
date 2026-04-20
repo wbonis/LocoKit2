@@ -120,10 +120,14 @@ public final class LocomotionManager: @unchecked Sendable {
 
         recordingState = .recording
 
-        if backgroundSession == nil {
-            backgroundSession = CLBackgroundActivitySession()
-        }
+        // CLBackgroundActivitySession disabled — causes ghost indicators that
+        // persist even after app deletion (known iOS bug). Background location
+        // works via allowsBackgroundLocationUpdates + background mode entitlement.
+        // if backgroundSession == nil {
+        //     backgroundSession = CLBackgroundActivitySession()
+        // }
 
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
         locationManager.startMonitoringSignificantLocationChanges()
         sleepLocationManager.stopUpdatingLocation()
@@ -137,11 +141,12 @@ public final class LocomotionManager: @unchecked Sendable {
 
     @MainActor
     public func stopRecording() {
-        print("LocomotionManager.stopRecording()")
-
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.allowsBackgroundLocationUpdates = false
         sleepLocationManager.stopUpdatingLocation()
+        sleepLocationManager.stopMonitoringSignificantLocationChanges()
+        sleepLocationManager.allowsBackgroundLocationUpdates = false
 
         stopCoreMotion()
 
@@ -157,6 +162,7 @@ public final class LocomotionManager: @unchecked Sendable {
 
     @MainActor
     public func startStandby() {
+        sleepLocationManager.allowsBackgroundLocationUpdates = true
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
@@ -634,6 +640,23 @@ public final class LocomotionManager: @unchecked Sendable {
             guard let self else { return }
             Task { await self.endExtendedWakeup() }
         }
+    }
+
+    // MARK: - Status Bar Indicator
+
+    public var showsBackgroundLocationIndicator: Bool = true {
+        didSet {
+            locationManager.showsBackgroundLocationIndicator = showsBackgroundLocationIndicator
+            sleepLocationManager.showsBackgroundLocationIndicator = showsBackgroundLocationIndicator
+        }
+    }
+
+    // MARK: - Accuracy
+
+    /// Updates the active location manager's desired accuracy and distance filter.
+    public func setDesiredAccuracy(_ accuracy: CLLocationAccuracy, distanceFilter: CLLocationDistance) {
+        locationManager.desiredAccuracy = accuracy
+        locationManager.distanceFilter = distanceFilter
     }
 
     // MARK: - Location Managers
