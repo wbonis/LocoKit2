@@ -29,8 +29,9 @@ public enum ActivityClassifier {
             return cached
         }
 
-        // no Core ML in background plz
-        if await UIApplication.shared.applicationState == .background { return nil }
+        // mapmyway: classification is allowed in the background.
+        // Apps with the `location` background mode can run CoreML inference;
+        // skipping it here makes periodic background classification impossible.
 
         // make sure have suitable classifiers
         if let coordinate = sample.location?.coordinate {
@@ -81,9 +82,8 @@ public enum ActivityClassifier {
     public static func results(for samples: [LocomotionSample], timeout: TimeInterval? = nil) async -> (combinedResults: ClassifierResults?, perSampleResults: [String: ClassifierResults])? {
         if samples.isEmpty { return nil }
 
-        // no Core ML in background plz
-        if await UIApplication.shared.applicationState == .background { return nil }
-        
+        // mapmyway: classification is allowed in the background — see results(for:) above.
+
         guard let handle = OperationRegistry.startOperation(
             .activityTypes,
             operation: "ActivityClassifier.results(for:timeout:)",
