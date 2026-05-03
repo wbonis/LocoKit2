@@ -25,8 +25,18 @@ public enum MLModelCache {
             return cached
         }
 
+        let modelURL = getModelURLFor(filename: filename)
+
+        // mapmyway: skip MLModel init for non-bundled CD* files that don't exist
+        // yet — CoreML otherwise prints "model is not found at URL" before our
+        // catch block ever sees the error. Bundled (B*) paths force-unwrap the
+        // bundle URL so they're always present when this code runs.
+        if !filename.hasPrefix("B"),
+           !FileManager.default.fileExists(atPath: modelURL.path) {
+            return nil
+        }
+
         do {
-            let modelURL = getModelURLFor(filename: filename)
             let newModel = try MLModel(contentsOf: modelURL)
             let predictor = ModelPredictor(newModel)
             loadedModels[filename] = predictor
