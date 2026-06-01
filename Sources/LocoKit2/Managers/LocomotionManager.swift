@@ -624,7 +624,11 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
-        manager.allowsBackgroundLocationUpdates = true
+        // allowsBackgroundLocationUpdates is set dynamically at recording/standby
+        // start (see startUpdatingLocation/startStandby), NOT at init: setting it
+        // here asserts in CoreLocation when the app lacks the `location` background
+        // mode — which the reader-only viewer apps in the MapMyWay split do. They
+        // initialise LocomotionManager.highlander (via AppGroup) but never record.
         return manager
     }()
 
@@ -635,7 +639,7 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
-        manager.allowsBackgroundLocationUpdates = true
+        // Set dynamically at standby start, not at init (see note above).
         return manager
     }()
 
