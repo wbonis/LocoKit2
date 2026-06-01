@@ -161,7 +161,10 @@ public final class AppGroup: @unchecked Sendable {
         case .updatedState:
             await appStateUpdated(by: messageInfo.appName)
         case .modifiedObjects:
-            break
+            guard await isAnActiveRecorder else { break }
+            for uuid in messageInfo.modifiedObjectIds ?? [] {
+                await TimelineProcessor.processFrom(itemId: uuid.uuidString)
+            }
         case .tookOverRecording:
             await concedeRecording(to: messageInfo.appName)
         }
@@ -206,12 +209,16 @@ public final class AppGroup: @unchecked Sendable {
 
     public enum AppName: String, CaseIterable, Codable, Sendable {
         case arcV3, arcMini, arcRecorder, arcEditor
+        case tracker, mapMyWay, tripLog
         public var sortIndex: Int {
             switch self {
             case .arcV3: return 0
             case .arcMini: return 1
             case .arcRecorder: return 2
             case .arcEditor: return 3
+            case .tracker: return 4
+            case .mapMyWay: return 5
+            case .tripLog: return 6
             }
         }
     }
