@@ -268,6 +268,11 @@ public final class LocomotionManager: @unchecked Sendable {
 
         stopCoreMotion()
 
+        // Background updates are no longer armed at init (that asserted in
+        // viewer apps without the `location` mode). Arm the sleep manager here —
+        // every route into sleep (recording→sleeping, endExtendedWakeup) passes
+        // through this method, and only the Tracker (which has the mode) records.
+        sleepLocationManager.allowsBackgroundLocationUpdates = true
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
@@ -624,11 +629,12 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
-        // allowsBackgroundLocationUpdates is set dynamically at recording/standby
-        // start (see startUpdatingLocation/startStandby), NOT at init: setting it
-        // here asserts in CoreLocation when the app lacks the `location` background
-        // mode — which the reader-only viewer apps in the MapMyWay split do. They
-        // initialise LocomotionManager.highlander (via AppGroup) but never record.
+        // allowsBackgroundLocationUpdates is armed dynamically when updates start
+        // — locationManager in startRecording(), sleepLocationManager in
+        // startSleeping()/startStandby() — NOT at init: setting it here asserts in
+        // CoreLocation when the app lacks the `location` background mode, which the
+        // reader-only viewer apps in the MapMyWay split do. They initialise
+        // LocomotionManager.highlander (via AppGroup) but never record.
         return manager
     }()
 

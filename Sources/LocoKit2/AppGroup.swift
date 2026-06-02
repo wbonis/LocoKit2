@@ -130,9 +130,34 @@ public final class AppGroup: @unchecked Sendable {
         }
     }
 
+    /// Accumulates modified object IDs into a shared pending set rather than the
+    /// single-slot `lastMessage` (which is last-writer-wins). Without this, two
+    /// rapid `notifyObjectChanges` calls — even from one viewer confirming place A
+    /// then B — overwrite each other and the recorder reprocesses only the last,
+    /// silently skipping the rest. The set is additive + drained on receipt.
+    /// (Same-process callers are @MainActor-serialised; cross-process simultaneous
+    /// read-modify-write is a narrow residual race — worst case a missed prompt
+    /// reprocess that the periodic loop later covers. NSFileCoordinator hardening
+    /// is a documented V1.x follow-up, plan §4.1.)
     public func notifyObjectChanges(objectIds: Set<UUID>) {
-        let messageInfo = MessageInfo(date: .now, message: .modifiedObjects, appName: thisApp, modifiedObjectIds: objectIds)
-        send(message: .modifiedObjects, messageInfo: messageInfo)
+        guard !objectIds.isEmpty else { return }
+        var pending = loadPendingModifiedObjects()
+        pending.formUnion(objectIds)
+        if let data = try? encoder.encode(pending) {
+            groupDefaults?.set(data, forKey: "pendingModifiedObjects")
+        }
+        talker.send(.modifiedObjects)
+    }
+
+    private func loadPendingModifiedObjects() -> Set<UUID> {
+        guard let data = groupDefaults?.data(forKey: "pendingModifiedObjects") else { return [] }
+        return (try? decoder.decode(Set<UUID>.self, from: data)) ?? []
+    }
+
+    private func drainPendingModifiedObjects() -> Set<UUID> {
+        let ids = loadPendingModifiedObjects()
+        groupDefaults?.removeObject(forKey: "pendingModifiedObjects")
+        return ids
     }
 
     // MARK: - Private
@@ -147,6 +172,18 @@ public final class AppGroup: @unchecked Sendable {
 
     // TODO: should store lastMessage in AppGroup (don't want to be relying on groupDefaults)
     private func received(_ message: AppGroup.Message) async {
+        // .modifiedObjects no longer rides in the single-slot lastMessage (it would
+        // be clobbered by rapid senders). Only the active recorder drains + reprocesses
+        // the accumulated pending set; an empty drain is a harmless no-op, so coalesced
+        // Darwin notifications are fine.
+        if message == .modifiedObjects {
+            guard await isAnActiveRecorder else { return }
+            for uuid in drainPendingModifiedObjects() {
+                await TimelineProcessor.processFrom(itemId: uuid.uuidString)
+            }
+            return
+        }
+
         guard let data = groupDefaults?.value(forKey: "lastMessage") as? Data else { return }
         guard let messageInfo = try? decoder.decode(MessageInfo.self, from: data) else { return }
         guard messageInfo.appName != thisApp else { return }
@@ -161,10 +198,7 @@ public final class AppGroup: @unchecked Sendable {
         case .updatedState:
             await appStateUpdated(by: messageInfo.appName)
         case .modifiedObjects:
-            guard await isAnActiveRecorder else { break }
-            for uuid in messageInfo.modifiedObjectIds ?? [] {
-                await TimelineProcessor.processFrom(itemId: uuid.uuidString)
-            }
+            break // handled above
         case .tookOverRecording:
             await concedeRecording(to: messageInfo.appName)
         }
