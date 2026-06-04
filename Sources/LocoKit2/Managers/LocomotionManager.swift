@@ -287,6 +287,13 @@ public final class LocomotionManager: @unchecked Sendable {
         if recordingState == .wakeup { return }
         if recordingState == .recording { return }
 
+        // Arm background updates before restarting the full-power manager — symmetric
+        // with startRecording()/startSleeping()/startStandby(). After the init-time
+        // arming was removed (viewer launch-crash fix, 9930dba), a wakeup reached via a
+        // cold background relaunch could otherwise call startUpdatingLocation() with the
+        // flag still false, so iOS delivered nothing and recording stayed silently dead.
+        // Only the Tracker (which has the `location` background mode) ever wakes.
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
 
         // if in standby, do standby specific checks then exit early
