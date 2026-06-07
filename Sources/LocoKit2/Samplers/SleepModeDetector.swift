@@ -12,13 +12,21 @@ actor SleepModeDetector {
 
     // MARK: - Config
 
-    public static let sleepModeDelay: TimeInterval = .minutes(2)
+    // How long the device must stay within the geofence before dropping to sleep
+    // mode. Default matches upstream; the host app can raise it (e.g. to avoid
+    // sleeping on brief stops, which otherwise create timeline gaps) at runtime
+    // via `LocomotionManager.setSleepModeDelay(_:)`.
+    public var sleepModeDelay: TimeInterval = .minutes(2)
     private let minGeofenceRadius: CLLocationDistance = 20.0
     private let maxGeofenceRadius: CLLocationDistance = 100.0
 
     // MARK: - Public
 
     private(set) var state = SleepDetectorState()
+
+    func setSleepModeDelay(_ delay: TimeInterval) {
+        sleepModeDelay = delay
+    }
 
     func add(filteredLocation: CLLocation, rawLocation: CLLocation) {
         if state.isFrozen {
@@ -69,7 +77,7 @@ actor SleepModeDetector {
         guard let newest = sample.last else { return }
 
         // age out samples older than sleepModeDelay
-        while sample.count > 2, let oldest = sample.first, oldest.timestamp.age > Self.sleepModeDelay {
+        while sample.count > 2, let oldest = sample.first, oldest.timestamp.age > sleepModeDelay {
             sample.removeFirst()
         }
 
@@ -98,7 +106,7 @@ actor SleepModeDetector {
             state.lastGeofenceEnterTime = nil
         }
 
-        state.shouldBeSleeping = state.durationWithinGeofence >= Self.sleepModeDelay
+        state.shouldBeSleeping = state.durationWithinGeofence >= sleepModeDelay
 
         // ensure correct frozen state
         if state.shouldBeSleeping {
