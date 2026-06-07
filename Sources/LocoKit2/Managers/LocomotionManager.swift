@@ -28,6 +28,13 @@ public final class LocomotionManager: @unchecked Sendable {
         sleepCycleDuration = duration
     }
 
+    /// Raises/lowers how long the device must be stationary within the geofence
+    /// before entering sleep mode (forwarded to the SleepModeDetector actor).
+    /// Longer delays avoid sleeping on brief stops, at a small battery cost.
+    public func setSleepModeDelay(_ delay: TimeInterval) async {
+        await sleepModeDetector.setSleepModeDelay(delay)
+    }
+
     public var recordRawLocations: Bool = false
 
     public var standbyCycleDuration: TimeInterval = 60 * 2
@@ -671,6 +678,14 @@ public final class LocomotionManager: @unchecked Sendable {
         locationManager.distanceFilter = distanceFilter
     }
 
+    /// Updates the sleep-mode location manager's accuracy and distance filter.
+    /// Coarser = lower battery but slower wakeup when leaving a geofence; finer =
+    /// faster wakeup (fewer timeline gaps) at higher battery cost. Default is 3 km.
+    public func setSleepLocationAccuracy(_ accuracy: CLLocationAccuracy, distanceFilter: CLLocationDistance) {
+        sleepLocationManager.desiredAccuracy = accuracy
+        sleepLocationManager.distanceFilter = distanceFilter
+    }
+
     // MARK: - Location Managers
 
     @ObservationIgnored
@@ -692,6 +707,10 @@ public final class LocomotionManager: @unchecked Sendable {
     @ObservationIgnored
     private let sleepLocationManager: CLLocationManager = {
         let manager = CLLocationManager()
+        // Upstream default. Coarse (3 km) + significant-location-change is very
+        // battery-frugal but iOS wakes the app slowly, so leaving a geofence can
+        // take minutes to detect (timeline gaps). The host app can override this
+        // at runtime via `setSleepLocationAccuracy(_:distanceFilter:)`.
         manager.distanceFilter = kCLLocationAccuracyThreeKilometers
         manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         manager.pausesLocationUpdatesAutomatically = false
