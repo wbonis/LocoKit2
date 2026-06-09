@@ -127,12 +127,16 @@ public final class LocomotionManager: @unchecked Sendable {
 
         recordingState = .recording
 
-        // CLBackgroundActivitySession disabled — causes ghost indicators that
-        // persist even after app deletion (known iOS bug). Background location
-        // works via allowsBackgroundLocationUpdates + background mode entitlement.
-        // if backgroundSession == nil {
-        //     backgroundSession = CLBackgroundActivitySession()
-        // }
+        // CLBackgroundActivitySession keeps the app alive in the background so the
+        // sleep-mode location manager keeps delivering and a departure after a stop
+        // is caught immediately — instead of iOS suspending the app and only waking
+        // it on the next significant-location-change (~20-30min later, losing the
+        // trip). Opt-in (off by default) because the session shows a persistent
+        // status-bar location indicator; callers enable it via
+        // `setKeepsAppAliveInBackground(_:)`.
+        if keepsAppAliveInBackground, backgroundSession == nil {
+            backgroundSession = CLBackgroundActivitySession()
+        }
 
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
@@ -258,6 +262,29 @@ public final class LocomotionManager: @unchecked Sendable {
 
     @ObservationIgnored
     private var backgroundSession: CLBackgroundActivitySession?
+
+    /// When true, recording holds a `CLBackgroundActivitySession` to stop iOS
+    /// suspending the app during sleep mode (catches departures promptly, but
+    /// shows the persistent status-bar location indicator). Default false.
+    /// Toggle at runtime via `setKeepsAppAliveInBackground(_:)`.
+    @ObservationIgnored
+    public private(set) var keepsAppAliveInBackground = false
+
+    /// Enable/disable the background-activity session. Safe to call any time:
+    /// when enabling while already recording it starts the session immediately;
+    /// when disabling it invalidates it (the indicator disappears).
+    @MainActor
+    public func setKeepsAppAliveInBackground(_ enabled: Bool) {
+        keepsAppAliveInBackground = enabled
+        if enabled {
+            if recordingState != .off, backgroundSession == nil {
+                backgroundSession = CLBackgroundActivitySession()
+            }
+        } else {
+            backgroundSession?.invalidate()
+            backgroundSession = nil
+        }
+    }
 
     // MARK: -
 
