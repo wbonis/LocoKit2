@@ -84,6 +84,14 @@ public final class Database: @unchecked Sendable {
         } catch {
             Log.error(error, subsystem: .database)
         }
+        // Bulk imports drop the sample R-tree insert trigger; if the app
+        // was killed mid-import the schema would stay without it. Cheap
+        // existence check, backfill + recreate only when needed.
+        do {
+            try pool.write { try Database.ensureSampleRTreeIntegrity($0) }
+        } catch {
+            Log.error(error, subsystem: .database)
+        }
         if !pending.isEmpty {
             Log.info("Migrations completed in \(String(format: "%.1f", -start.timeIntervalSinceNow))s", subsystem: .database)
         }
