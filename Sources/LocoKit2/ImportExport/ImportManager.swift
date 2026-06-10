@@ -23,8 +23,22 @@ public enum ImportManager {
     // MARK: - Import state
 
     public private(set) static var importInProgress = false
-    public private(set) static var currentPhase: ImportPhase?
+    public private(set) static var currentPhase: ImportPhase? {
+        didSet {
+            currentFileName = nil
+            currentFileIndex = 0
+            currentFileTotal = 0
+        }
+    }
     public private(set) static var progress: Double = 0
+
+    // Per-file progress detail for UI display — which file within the
+    // current phase is being processed (items files are monthly
+    // "YYYY-MM.json", sample files weekly "YYYY-Www.json[.gz]", so
+    // consumers can derive a human-readable date from the name).
+    public private(set) static var currentFileName: String?
+    public private(set) static var currentFileIndex: Int = 0
+    public private(set) static var currentFileTotal: Int = 0
 
     public enum ImportPhase: Sendable {
         case copying
@@ -270,6 +284,9 @@ public enum ImportManager {
 
         // Process monthly files
         for fileURL in itemFiles {
+            currentFileName = fileURL.lastPathComponent
+            currentFileIndex = processedFiles + 1
+            currentFileTotal = totalFiles
             do {
                 let fileData = try Data(contentsOf: fileURL)
                 let items = try JSONDecoder.flexibleDateDecoder().decode([TimelineItem].self, from: fileData)
@@ -415,6 +432,10 @@ public enum ImportManager {
 
         // process each week's file
         for fileURL in filesToProcess {
+            currentFileName = fileURL.lastPathComponent
+            currentFileIndex = processedFiles + 1
+            currentFileTotal = totalFiles
+
             // track per-file orphans for persistence
             var fileOrphans: [String: [LocomotionSample]] = [:]
             var fileScenario2: [String: [LocomotionSample]] = [:]
