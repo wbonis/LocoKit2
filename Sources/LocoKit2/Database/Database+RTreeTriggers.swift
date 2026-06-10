@@ -62,6 +62,38 @@ extension Database {
         }
     }
 
+    /// Recreates the sample R-tree insert trigger and bulk-backfills any
+    /// samples inserted while it was missing. Safety net for databases
+    /// touched by builds that dropped the trigger during bulk imports —
+    /// an app kill mid-import left the schema without it. Cheap no-op
+    /// when the trigger is present.
+    static func ensureSampleRTreeIntegrity(_ db: GRDB.Database) throws {
+        let triggerExists = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'trigger' AND name = 'LocomotionSample_AFTER_INSERT_coordinates'
+            )
+            """) ?? false
+        if triggerExists { return }
+
+        Log.info("Sample R-tree insert trigger missing - backfilling and recreating", subsystem: .database)
+
+        let base = try Int64.fetchOne(db, sql: "SELECT IFNULL(MAX(id), 0) FROM SampleRTree") ?? 0
+        try db.execute(sql: """
+            INSERT INTO SampleRTree (id, latMin, latMax, lonMin, lonMax)
+            SELECT rowid + ?, latitude, latitude, longitude, longitude
+            FROM LocomotionSample
+            WHERE rtreeId IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL
+            """, arguments: [base])
+        try db.execute(sql: """
+            UPDATE LocomotionSample SET rtreeId = rowid + ?
+            WHERE rtreeId IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL
+            """, arguments: [base])
+
+        try db.execute(sql: "DROP TRIGGER IF EXISTS LocomotionSample_AFTER_DELETE_rtreeId")
+        try createSampleRTreeTriggers(db)
+    }
+
     static func createSampleRTreeTriggers(_ db: GRDB.Database) throws {
         try db.execute(sql: """
             CREATE TRIGGER LocomotionSample_AFTER_INSERT_coordinates
