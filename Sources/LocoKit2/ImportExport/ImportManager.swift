@@ -52,13 +52,23 @@ public enum ImportManager {
     private static var importURL: URL?
     private static var wasObserving: Bool = true
     private static var wasRecording: Bool = false
+    private static var restoreRecordingOnCompletion = true
 
     // MARK: - Import process
 
-    /// Start a new import from a source URL (copies to local first)
+    /// Start a new import from a source URL (copies to local first).
+    ///
+    /// `restoreRecordingOnCompletion: false` skips the automatic
+    /// observer/recorder restart after a successful import. Hosts that
+    /// run their own post-import database work (conflict cleanup, place
+    /// confirmation) pass `false` so that work doesn't contend with the
+    /// TimelineProcessor / ActivityTypesManager wake-up for the single
+    /// SQLite writer — then call `restoreRecordingState()` when done.
+    /// Failed imports keep today's behaviour regardless of the flag.
     public static func startImport(
         from sourceURL: URL,
-        extensions: [ImportExtensionHandler] = []
+        extensions: [ImportExtensionHandler] = [],
+        restoreRecordingOnCompletion: Bool = true
     ) async throws {
         guard !importInProgress else {
             throw ImportExportError.importInProgress
@@ -68,6 +78,7 @@ public enum ImportManager {
         importInProgress = true
         currentPhase = .copying
         progress = 0
+        Self.restoreRecordingOnCompletion = restoreRecordingOnCompletion
 
         // save initial states and disable observation/recording during import
         wasObserving = TimelineObserver.highlander.enabled
@@ -633,11 +644,13 @@ public enum ImportManager {
 
     /// Resume an interrupted import from local copy
     public static func resumeImport(
-        extensions: [ImportExtensionHandler] = []
+        extensions: [ImportExtensionHandler] = [],
+        restoreRecordingOnCompletion: Bool = true
     ) async throws {
         guard !importInProgress else {
             throw ImportExportError.importInProgress
         }
+        Self.restoreRecordingOnCompletion = restoreRecordingOnCompletion
 
         guard let state = try await ImportState.current(),
               let localURL = ImportState.localCopyURL(for: state) else {
@@ -687,14 +700,26 @@ public enum ImportManager {
         try? await ImportState.clear()
         ImportState.deleteLocalCopy()
 
-        // restore observation/recording to initial states
+        // restore observation/recording to initial states — unless the
+        // host asked to do its own post-import work first
+        if restoreRecordingOnCompletion {
+            await restoreRecordingState()
+        }
+
+        importInProgress = false
+        currentPhase = nil
+        importURL = nil
+    }
+
+    /// Restores TimelineObserver/TimelineRecorder to their pre-import
+    /// states. Call after host-side post-import work when the import ran
+    /// with `restoreRecordingOnCompletion: false`. Recording restart is
+    /// still subject to the partial-import guard.
+    public static func restoreRecordingState() async {
         TimelineObserver.highlander.enabled = wasObserving
         if wasRecording {
             try? await TimelineRecorder.startRecording()
         }
-
-        importInProgress = false
-        importURL = nil
     }
 
     private static func cleanupFailedImport() {
@@ -709,6 +734,7 @@ public enum ImportManager {
         TimelineObserver.highlander.enabled = wasObserving
 
         importInProgress = false
+        currentPhase = nil
         self.importURL = nil
     }
 
@@ -724,6 +750,7 @@ public enum ImportManager {
         }
 
         importInProgress = false
+        currentPhase = nil
         importURL = nil
     }
 }
