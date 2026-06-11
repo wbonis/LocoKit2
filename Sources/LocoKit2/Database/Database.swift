@@ -27,18 +27,26 @@ public final class Database: @unchecked Sendable {
         } else {
             dbUrl = appGroupDbUrl ?? appContainerDbUrl
         }
-        return try! DatabasePool(path: dbUrl.path, configuration: config)
+        return try! DatabasePool(path: dbUrl.path, configuration: makeConfig(dbPath: dbUrl.path))
     }()
 
     public private(set) lazy var legacyPool: DatabasePool? = {
         guard let dbUrl = appGroupLegacyDbUrl else { return nil }
-        return try! DatabasePool(path: dbUrl.path, configuration: config)
+        return try! DatabasePool(path: dbUrl.path, configuration: makeConfig(dbPath: dbUrl.path))
     }()
 
-    private lazy var config: Configuration = {
+    private func makeConfig(dbPath: String) -> Configuration {
         var config = Configuration()
         config.busyMode = .timeout(30)
         config.maximumReaderCount = 12
+        config.observesSuspensionNotifications = true
+        config.prepareDatabase { db in
+            if !db.configuration.readonly {
+                try FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: dbPath)
+            }
+        }
 
 //        config.prepareDatabase { db in
 //            db.trace { event in
@@ -47,7 +55,7 @@ public final class Database: @unchecked Sendable {
 //        }
 
         return config
-    }()
+    }
 
     // MARK: - Migrations
 
@@ -103,7 +111,13 @@ public final class Database: @unchecked Sendable {
 
     // MARK: -
 
-    private func addMigrations() {
+    /// Registers the schema migrations into `migrator` WITHOUT running them.
+    /// Public so a read-only viewer (App-Group multi-app split) can populate
+    /// the migrator and then use `havePendingMigrations` / `appliedMigrations`
+    /// for the ADR-0004 schema-version guard, without ever migrating.
+    /// WARNING: do not also call `doMigrations()` in the same process — that
+    /// would register the same migration identifiers twice and trap.
+    public func addMigrations() {
         addInitialSchema(to: &migrator)
         addLastSavedTriggers(to: &migrator)
         addEdgeTriggers(to: &migrator)
