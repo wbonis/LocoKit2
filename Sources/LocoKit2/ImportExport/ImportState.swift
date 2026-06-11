@@ -25,6 +25,12 @@ public struct ImportState: FetchableRecord, PersistableRecord, Codable, Sendable
     public var processedSampleFiles: [String]?
     public var localCopyPath: String?  // path relative to app container
 
+    /// Day keys ("yyyy-MM-dd", device timezone) that had local recordings
+    /// when the import started. Captured once at import start and persisted
+    /// so resumed imports skip the same days — recomputing after partial
+    /// import would wrongly include freshly imported days.
+    public var localDayKeys: [String]?
+
     public init(
         exportId: String? = nil,
         startedAt: Date = .now,
@@ -40,7 +46,7 @@ public struct ImportState: FetchableRecord, PersistableRecord, Codable, Sendable
     // MARK: - Codable
 
     enum CodingKeys: String, CodingKey {
-        case id, exportId, startedAt, phase, processedSampleFiles, localCopyPath
+        case id, exportId, startedAt, phase, processedSampleFiles, localCopyPath, localDayKeys
     }
 
     public init(from decoder: Decoder) throws {
@@ -51,10 +57,14 @@ public struct ImportState: FetchableRecord, PersistableRecord, Codable, Sendable
         phase = try container.decode(ImportPhase.self, forKey: .phase)
         localCopyPath = try container.decodeIfPresent(String.self, forKey: .localCopyPath)
 
-        // decode JSON array from text column
+        // decode JSON arrays from text columns
         if let jsonString = try container.decodeIfPresent(String.self, forKey: .processedSampleFiles),
            let jsonData = jsonString.data(using: .utf8) {
             processedSampleFiles = try? JSONDecoder().decode([String].self, from: jsonData)
+        }
+        if let jsonString = try container.decodeIfPresent(String.self, forKey: .localDayKeys),
+           let jsonData = jsonString.data(using: .utf8) {
+            localDayKeys = try? JSONDecoder().decode([String].self, from: jsonData)
         }
     }
 
@@ -66,11 +76,16 @@ public struct ImportState: FetchableRecord, PersistableRecord, Codable, Sendable
         try container.encode(phase, forKey: .phase)
         try container.encodeIfPresent(localCopyPath, forKey: .localCopyPath)
 
-        // encode array as JSON text
+        // encode arrays as JSON text
         if let files = processedSampleFiles,
            let jsonData = try? JSONEncoder().encode(files),
            let jsonString = String(data: jsonData, encoding: .utf8) {
             try container.encode(jsonString, forKey: .processedSampleFiles)
+        }
+        if let days = localDayKeys,
+           let jsonData = try? JSONEncoder().encode(days),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            try container.encode(jsonString, forKey: .localDayKeys)
         }
     }
 }

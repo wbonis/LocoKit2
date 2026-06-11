@@ -11,6 +11,31 @@ import GRDB
 @ImportExportActor
 public enum ImportHelpers {
 
+    // MARK: - Day-based dedup
+
+    /// Calendar-day key ("yyyy-MM-dd") for a date, in the device's current
+    /// timezone. Must stay consistent with the SQL side, which uses
+    /// `DATE(startDate, 'localtime')` — both resolve via the system timezone.
+    nonisolated public static func dayKey(for date: Date) -> String {
+        let comps = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", comps.year!, comps.month!, comps.day!)
+    }
+
+    /// Day keys of all calendar days that already have locally recorded
+    /// timeline items. Imports use this to skip incoming days wholesale —
+    /// local data wins, the imported day is not imported at all.
+    ///
+    /// Excludes `SampleData` (demo data) so loaded demo days don't block
+    /// real imports, and disabled items, matching host-side conflict scans.
+    public static func fetchExistingDayKeys() async throws -> Set<String> {
+        try await Database.pool.uncancellableRead { db in
+            try String.fetchSet(db, sql: """
+                SELECT DISTINCT DATE(startDate, 'localtime') FROM TimelineItemBase
+                WHERE deleted = 0 AND disabled = 0 AND startDate IS NOT NULL AND source != 'SampleData'
+                """)
+        }
+    }
+
     /// Create preserved parent items for disabled samples from enabled parents
     ///
     /// Handles scenario 2 mismatches where samples are disabled but their parent item is enabled.

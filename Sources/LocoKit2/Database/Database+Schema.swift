@@ -192,6 +192,7 @@ extension Database {
                 table.column("phase", .text).notNull()
                 table.column("processedSampleFiles", .text)  // JSON array
                 table.column("localCopyPath", .text)
+                table.column("localDayKeys", .text)  // JSON array of "yyyy-MM-dd"
             }
         }
     }
