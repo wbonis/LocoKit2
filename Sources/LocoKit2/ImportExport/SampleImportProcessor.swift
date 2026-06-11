@@ -16,6 +16,7 @@ public struct SampleBatchResult: Sendable {
     public var orphanCount: Int
     public var scenario1Count: Int
     public var scenario2Count: Int
+    public var skippedCount: Int
 
     public init() {
         self.orphans = [:]
@@ -23,6 +24,7 @@ public struct SampleBatchResult: Sendable {
         self.orphanCount = 0
         self.scenario1Count = 0
         self.scenario2Count = 0
+        self.skippedCount = 0
     }
 }
 
@@ -36,6 +38,10 @@ public enum SampleImportProcessor {
     ///   - samples: The samples to process
     ///   - validItemIds: Set of valid timeline item IDs (samples referencing other IDs are orphaned)
     ///   - itemDisabledStates: Map of item ID to disabled state for mismatch detection
+    ///   - skippedItemIds: Item IDs skipped by day-based dedup — their samples are dropped entirely
+    ///   - skippedDayKeys: Day keys ("yyyy-MM-dd") owned by local data — parentless/orphaned samples
+    ///     on these days are dropped instead of inserted or orphan-collected (orphan processing
+    ///     would otherwise recreate the skipped day's items)
     ///   - orphanOnlyIfEnabled: If true, only treat samples as orphans if they're not disabled (OldLocoKitImporter behavior)
     ///   - db: Database connection for insertion
     /// - Returns: Batch result with orphans, scenario2 samples, and counts
@@ -43,12 +49,26 @@ public enum SampleImportProcessor {
         samples: [LocomotionSample],
         validItemIds: Set<String>,
         itemDisabledStates: [String: Bool],
+        skippedItemIds: Set<String> = [],
+        skippedDayKeys: Set<String> = [],
         orphanOnlyIfEnabled: Bool = false,
         db: GRDB.Database
     ) throws -> SampleBatchResult {
         var result = SampleBatchResult()
 
         for var sample in samples {
+            // day-based dedup: drop samples of skipped items, and parentless
+            // samples on days owned by local data
+            if let itemId = sample.timelineItemId {
+                if skippedItemIds.contains(itemId) {
+                    result.skippedCount += 1
+                    continue
+                }
+            } else if !skippedDayKeys.isEmpty, skippedDayKeys.contains(ImportHelpers.dayKey(for: sample.date)) {
+                result.skippedCount += 1
+                continue
+            }
+
             var scenario2Key: String?
             var orphanKey: String?
 
@@ -69,6 +89,13 @@ public enum SampleImportProcessor {
 
             // check for orphaned samples (references to missing items)
             if let originalItemId = sample.timelineItemId, !validItemIds.contains(originalItemId) {
+                // day-based dedup: don't insert or orphan-collect on days owned
+                // by local data — orphan processing would recreate the day's items
+                if !skippedDayKeys.isEmpty, skippedDayKeys.contains(ImportHelpers.dayKey(for: sample.date)) {
+                    result.skippedCount += 1
+                    continue
+                }
+
                 // optionally skip disabled samples for orphan collection (legacy import behavior)
                 if !orphanOnlyIfEnabled || !sample.disabled {
                     orphanKey = originalItemId
@@ -100,6 +127,9 @@ public enum SampleImportProcessor {
 
     /// Log batch results if there were any issues found.
     public static func logBatchResults(_ result: SampleBatchResult) {
+        if result.skippedCount > 0 {
+            Log.info("Skipped \(result.skippedCount) samples on days owned by local data", subsystem: .importing)
+        }
         if result.orphanCount > 0 {
             Log.error("Orphaned \(result.orphanCount) samples with missing parent items", subsystem: .importing)
         }
