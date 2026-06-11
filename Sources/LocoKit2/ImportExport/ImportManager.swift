@@ -65,10 +65,17 @@ public enum ImportManager {
     /// TimelineProcessor / ActivityTypesManager wake-up for the single
     /// SQLite writer — then call `restoreRecordingState()` when done.
     /// Failed imports keep today's behaviour regardless of the flag.
+    ///
+    /// `skipExistingDays` (default on) is day-based dedup: any calendar day
+    /// that already has locally recorded items is skipped wholesale — the
+    /// local recordings win, none of the imported day's items or samples
+    /// are inserted. Prevents duplicated timelines when the import source
+    /// (eg Arc Timeline) recorded in parallel with this app.
     public static func startImport(
         from sourceURL: URL,
         extensions: [ImportExtensionHandler] = [],
-        restoreRecordingOnCompletion: Bool = true
+        restoreRecordingOnCompletion: Bool = true,
+        skipExistingDays: Bool = true
     ) async throws {
         guard !importInProgress else {
             throw ImportExportError.importInProgress
@@ -106,12 +113,22 @@ public enum ImportManager {
 
             // save import state for resume capability (copy is complete)
             let relativePath = localURL.lastPathComponent
-            let state = ImportState(
+            var state = ImportState(
                 exportId: metadata.exportId,
                 startedAt: startTime,
                 phase: .places,
                 localCopyPath: relativePath
             )
+
+            // capture locally recorded days BEFORE any inserts, and persist
+            // them so a resumed import skips the same days (recomputing after
+            // partial import would wrongly include freshly imported days)
+            if skipExistingDays {
+                let dayKeys = try await ImportHelpers.fetchExistingDayKeys()
+                state.localDayKeys = Array(dayKeys)
+                Log.info("ImportManager: Day-based dedup active (\(dayKeys.count) locally recorded days)", subsystem: .importing)
+            }
+
             try await ImportState.save(state)
 
             try await performImportPhases(extensions: extensions, startTime: startTime, isResume: false)
@@ -186,14 +203,30 @@ public enum ImportManager {
         startTime: Date,
         isResume: Bool
     ) async throws {
+        // day-based dedup: days owned by local data, captured at import start
+        // (read from ImportState so resumed imports skip the same days)
+        let skippedDayKeys: Set<String>
+        if let stored = try await ImportState.current()?.localDayKeys {
+            skippedDayKeys = Set(stored)
+        } else {
+            skippedDayKeys = []
+        }
+
         let placesCount = try await importPlaces()
 
         try await ImportState.updatePhase(.items)
         let edgeManager = EdgeRecordManager()
-        let (itemsCount, timelineItemIds, itemDisabledStates) = try await importTimelineItems(edgeManager: edgeManager)
+        let (itemsCount, timelineItemIds, itemDisabledStates, skippedItemIds) = try await importTimelineItems(
+            edgeManager: edgeManager, skippedDayKeys: skippedDayKeys
+        )
 
         try await ImportState.updatePhase(.samples)
-        let (samplesCount, orphansProcessed) = try await importSamples(timelineItemIds: timelineItemIds, itemDisabledStates: itemDisabledStates)
+        let (samplesCount, orphansProcessed) = try await importSamples(
+            timelineItemIds: timelineItemIds,
+            itemDisabledStates: itemDisabledStates,
+            skippedItemIds: skippedItemIds,
+            skippedDayKeys: skippedDayKeys
+        )
 
         // run extension handlers
         try await ImportState.updatePhase(.extensions)
@@ -210,6 +243,9 @@ public enum ImportManager {
         summary += "\(placesCount) places, \(itemsCount) items, \(samplesCount) samples"
         if orphansProcessed > 0 {
             summary += " (processed \(orphansProcessed) orphaned samples)"
+        }
+        if !skippedItemIds.isEmpty {
+            summary += " — skipped \(skippedItemIds.count) items on \(skippedDayKeys.count) locally recorded days"
         }
         Log.info(summary, subsystem: .importing)
 
@@ -267,7 +303,10 @@ public enum ImportManager {
 
     // MARK: - Items
 
-    private static func importTimelineItems(edgeManager: EdgeRecordManager) async throws -> (count: Int, itemIds: Set<String>, disabledStates: [String: Bool]) {
+    private static func importTimelineItems(
+        edgeManager: EdgeRecordManager,
+        skippedDayKeys: Set<String>
+    ) async throws -> (count: Int, itemIds: Set<String>, disabledStates: [String: Bool], skippedItemIds: Set<String>) {
         guard let importURL else {
             throw ImportExportError.importNotInitialised
         }
@@ -290,6 +329,7 @@ public enum ImportManager {
         var totalItems = 0
         var allTimelineItemIds = Set<String>()
         var itemDisabledStates: [String: Bool] = [:]
+        var skippedItemIds = Set<String>()
         let totalFiles = itemFiles.count
         var processedFiles = 0
 
@@ -302,13 +342,30 @@ public enum ImportManager {
                 let fileData = try Data(contentsOf: fileURL)
                 let items = try JSONDecoder.flexibleDateDecoder().decode([TimelineItem].self, from: fileData)
                 print("Loaded \(items.count) items from \(fileURL.lastPathComponent)")
-                totalItems += items.count
+
+                // day-based dedup: skip items starting on days owned by local
+                // data — the local recordings win, the imported day is dropped
+                var importableItems: [TimelineItem] = items
+                if !skippedDayKeys.isEmpty {
+                    importableItems = []
+                    importableItems.reserveCapacity(items.count)
+                    for item in items {
+                        if let startDate = item.base.startDate,
+                           skippedDayKeys.contains(ImportHelpers.dayKey(for: startDate)) {
+                            skippedItemIds.insert(item.id)
+                        } else {
+                            importableItems.append(item)
+                        }
+                    }
+                }
+
+                totalItems += importableItems.count
 
                 // Collect all timeline item IDs for later reference validation
-                allTimelineItemIds.formUnion(items.map { $0.id })
-                
+                allTimelineItemIds.formUnion(importableItems.map { $0.id })
+
                 // Process in batches of 500 (matching OldLocoKitImporter)
-                for batch in items.chunked(into: 500) {
+                for batch in importableItems.chunked(into: 500) {
                     let batchDisabledStates = try await Database.pool.uncancellableWrite { db in
                         try processTimelineItemBatch(batch, edgeManager: edgeManager, db: db)
                     }
@@ -322,12 +379,16 @@ public enum ImportManager {
                 continue // Log and continue on file errors
             }
         }
-        
+
         // Now restore edge relationships using the EdgeRecordManager
         try await restoreEdgeRelationships(using: edgeManager)
 
+        if !skippedItemIds.isEmpty {
+            Log.info("ImportManager: Day-based dedup skipped \(skippedItemIds.count) items on locally recorded days", subsystem: .importing)
+        }
+
         Log.info("ImportManager: Timeline items import complete (\(totalItems) items)", subsystem: .importing)
-        return (totalItems, allTimelineItemIds, itemDisabledStates)
+        return (totalItems, allTimelineItemIds, itemDisabledStates, skippedItemIds)
     }
 
     private nonisolated static func processTimelineItemBatch(
@@ -406,7 +467,12 @@ public enum ImportManager {
 
     // MARK: - Samples
 
-    private static func importSamples(timelineItemIds: Set<String>, itemDisabledStates: [String: Bool]) async throws -> (samples: Int, orphansProcessed: Int) {
+    private static func importSamples(
+        timelineItemIds: Set<String>,
+        itemDisabledStates: [String: Bool],
+        skippedItemIds: Set<String>,
+        skippedDayKeys: Set<String>
+    ) async throws -> (samples: Int, orphansProcessed: Int) {
         guard let importURL else {
             throw ImportExportError.importNotInitialised
         }
@@ -462,11 +528,13 @@ public enum ImportManager {
 
                 // process in batches of 1000
                 for batch in samples.chunked(into: 1000) {
-                    let batchResult = try await Database.pool.uncancellableWrite { [timelineItemIds, itemDisabledStates] db in
+                    let batchResult = try await Database.pool.uncancellableWrite { [timelineItemIds, itemDisabledStates, skippedItemIds, skippedDayKeys] db in
                         try SampleImportProcessor.processBatch(
                             samples: batch,
                             validItemIds: timelineItemIds,
                             itemDisabledStates: itemDisabledStates,
+                            skippedItemIds: skippedItemIds,
+                            skippedDayKeys: skippedDayKeys,
                             db: db
                         )
                     }
