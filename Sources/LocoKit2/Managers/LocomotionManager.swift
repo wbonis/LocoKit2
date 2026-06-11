@@ -270,6 +270,11 @@ public final class LocomotionManager: @unchecked Sendable {
 
         stopCoreMotion()
 
+        // Background updates are no longer armed at init (that asserted in
+        // viewer apps without the `location` mode). Arm the sleep manager here —
+        // every route into sleep (recording→sleeping, endExtendedWakeup) passes
+        // through this method, and only the Tracker (which has the mode) records.
+        sleepLocationManager.allowsBackgroundLocationUpdates = true
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
@@ -285,6 +290,13 @@ public final class LocomotionManager: @unchecked Sendable {
         if recordingState == .wakeup { return }
         if recordingState == .recording { return }
 
+        // Arm background updates before restarting the full-power manager — symmetric
+        // with startRecording()/startSleeping()/startStandby(). After the init-time
+        // arming was removed (viewer launch-crash fix, 9930dba), a wakeup reached via a
+        // cold background relaunch could otherwise call startUpdatingLocation() with the
+        // flag still false, so iOS delivered nothing and recording stayed silently dead.
+        // Only the Tracker (which has the `location` background mode) ever wakes.
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
 
         // if in standby, do standby specific checks then exit early
@@ -672,7 +684,12 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
-        manager.allowsBackgroundLocationUpdates = true
+        // allowsBackgroundLocationUpdates is armed dynamically when updates start
+        // — locationManager in startRecording(), sleepLocationManager in
+        // startSleeping()/startStandby() — NOT at init: setting it here asserts in
+        // CoreLocation when the app lacks the `location` background mode, which the
+        // reader-only viewer apps in the MapMyWay split do. They initialise
+        // LocomotionManager.highlander (via AppGroup) but never record.
         return manager
     }()
 
@@ -683,7 +700,7 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
-        manager.allowsBackgroundLocationUpdates = true
+        // Set dynamically at standby start, not at init (see note above).
         return manager
     }()
 
