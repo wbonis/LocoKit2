@@ -233,6 +233,14 @@ extension Database {
             }
         }
 
+        migrator.registerMigration("ImportState_localDayKeys") { db in
+            // days with local recordings at import start, for day-based
+            // import dedup (persisted so resume skips the same days)
+            try? db.alter(table: "ImportState") { table in
+                table.add(column: "localDayKeys", .text)  // JSON array of "yyyy-MM-dd"
+            }
+        }
+
         migrator.registerMigration("OldLocoKitImportState") { db in
             // singleton table for tracking old LocoKit import state (for resume on interruption)
             try? db.create(table: "OldLocoKitImportState") { table in
