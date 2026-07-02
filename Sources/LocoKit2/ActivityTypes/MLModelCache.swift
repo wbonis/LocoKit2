@@ -37,7 +37,12 @@ public enum MLModelCache {
         }
 
         do {
-            let newModel = try MLModel(contentsOf: modelURL)
+            // mapmyway: background inference is opt-in (ActivityClassifier) —
+            // keep CoreML off the GPU so iOS doesn't penalise background GPU
+            // work with termination. CPU + ANE cover these classifiers fully.
+            let config = MLModelConfiguration()
+            config.computeUnits = .cpuAndNeuralEngine
+            let newModel = try MLModel(contentsOf: modelURL, configuration: config)
             let predictor = ModelPredictor(newModel)
             loadedModels[filename] = predictor
             return predictor
