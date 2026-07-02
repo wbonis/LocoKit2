@@ -336,7 +336,17 @@ public enum TimelineRecorder {
         if let lastRecordSampleCall, lastRecordSampleCall.age < 1 { return }
         lastRecordSampleCall = .now
 
-        let sample = await loco.createASample()
+        var sample = await loco.createASample()
+
+        // mapmyway: decide the sample's timeline item BEFORE the insert. The hot
+        // path (attach to the current item) then persists in a single commit —
+        // LocomotionSample_AFTER_INSERT_timelineItemId_SET does the item bump —
+        // instead of insert + assignment update, halving WAL commits while
+        // recording. New-item boundaries keep the two-step flow.
+        let destination = await destination(for: sample)
+        if case .attach(let itemId) = destination {
+            sample.timelineItemId = itemId
+        }
 
         do {
             try await Database.pool.write { [sample] in
@@ -345,7 +355,10 @@ public enum TimelineRecorder {
 
             RecordingStats.incrementSamples()
 
-            await processSample(sample)
+            if case .newItem(let previousItemId) = destination {
+                let newItemBase = await createTimelineItem(from: sample, previousItemId: previousItemId)
+                currentItemId = newItemBase.id
+            }
 
             // reset the fallback
             await startFallbackSampleTimer()
@@ -357,13 +370,16 @@ public enum TimelineRecorder {
         latestSampleId = sample.id
     }
 
-    private static func processSample(_ sample: LocomotionSample) async {
+    private enum SampleDestination {
+        case attach(itemId: String)
+        case newItem(previousItemId: String?)
+    }
+
+    private static func destination(for sample: LocomotionSample) async -> SampleDestination {
 
         /** first timeline item **/
         guard let workingItem = currentItem() else {
-            let newItemBase = await createTimelineItem(from: sample)
-            currentItemId = newItemBase.id
-            return
+            return .newItem(previousItemId: nil)
         }
 
         /** stale current item — recording went dark (app termination etc). don't link the
@@ -373,9 +389,7 @@ public enum TimelineRecorder {
             connected there, same as linking here would have **/
         if let lastKnown = workingItem.dateRange?.end,
            sample.date.timeIntervalSince(lastKnown) >= TimelineProcessor.edgeHealingThreshold {
-            let newItemBase = await createTimelineItem(from: sample)
-            currentItemId = newItemBase.id
-            return
+            return .newItem(previousItemId: nil)
         }
 
         let previouslyMoving = !workingItem.isVisit
@@ -387,22 +401,11 @@ public enum TimelineRecorder {
 
         /** stationary -> moving || moving -> stationary (only during recording) **/
         if isFullRecording, currentlyMoving != previouslyMoving {
-            let newItemBase = await createTimelineItem(from: sample, previousItemId: workingItem.id)
-            currentItemId = newItemBase.id
-            return
+            return .newItem(previousItemId: workingItem.id)
         }
 
         /** same state, or wakeup — attach sample to current item **/
-        do {
-            try await Database.pool.write { [sample] in
-                var mutableSample = sample
-                try mutableSample.updateChanges($0) {
-                    $0.timelineItemId = workingItem.id
-                }
-            }
-        } catch {
-            Log.error(error, subsystem: .database)
-        }
+        return .attach(itemId: workingItem.id)
     }
 
     private static func createTimelineItem(from sample: LocomotionSample, previousItemId: String? = nil) async -> TimelineItemBase {
