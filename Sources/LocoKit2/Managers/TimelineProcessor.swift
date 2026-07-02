@@ -45,15 +45,9 @@ public enum TimelineProcessor {
             return
         }
 
-        // Merge transactions write the shared app-group database. If iOS
-        // suspends the process mid-write it gets killed with 0xdead10cc —
-        // the assertion buys time to finish the current pass first.
-        let backgroundKeeper = await BackgroundTaskGuard(name: "TimelineProcessor.process")
-        defer { backgroundKeeper.finish() }
-
         let itemIds = list.itemIds
         let objectKey = Set(itemIds).hashValue.description
-        
+
         guard let handle = OperationRegistry.startOperation(
             .timeline,
             operation: "TimelineProcessor.process(list:)",
@@ -65,6 +59,14 @@ public enum TimelineProcessor {
         }
 
         defer { OperationRegistry.endOperation(handle) }
+
+        // Merge transactions write the shared app-group database. If iOS
+        // suspends the process mid-write it gets killed with 0xdead10cc —
+        // the assertion buys time to finish the current pass first. Created
+        // after the duplicate check so skipped passes don't pay the
+        // MainActor hop + begin/endBackgroundTask.
+        let backgroundKeeper = await BackgroundTaskGuard(name: "TimelineProcessor.process")
+        defer { backgroundKeeper.finish() }
         
         var lastResult: MergeResult?
         do {
