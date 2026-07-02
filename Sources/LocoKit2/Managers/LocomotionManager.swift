@@ -377,7 +377,16 @@ public final class LocomotionManager: @unchecked Sendable {
     }
 
     // MARK: - Incoming locations handling
-    
+
+    // mapmyway: at driving speeds the 3m distanceFilter delivers 5-10 locations
+    // per second, but the stationary/sleep detectors work on ~10s windows and
+    // only need ~1Hz to stay fresh. Above this speed, detector feeds are
+    // throttled to 1Hz; the Kalman filter still gets every location (route
+    // quality) and the recording state is still updated per location.
+    private static let detectorThrottleMinSpeed: CLLocationSpeed = 8  // ~29 km/h
+    @MainActor
+    private var lastDetectorFeed: Date?
+
     @MainActor
     internal func add(location: CLLocation) async {
         // only accept locations when recording is supposed to be happening
@@ -424,11 +433,19 @@ public final class LocomotionManager: @unchecked Sendable {
         await kalmanFilter.add(location: kalmanInput)
         let kalmanLocation = await kalmanFilter.currentEstimatedLocation()
 
-        // stationary detector gets the original raw for invalidVelocity checks
-        await stationaryDetector.add(location: kalmanLocation)
-        await stationaryDetector.addRaw(location: location)
+        // mapmyway: throttle detector feeds to 1Hz while clearly moving fast
+        // (see detectorThrottleMinSpeed above). Invalid speeds (-1) never throttle.
+        let clearlyMovingFast = kalmanLocation.speed >= Self.detectorThrottleMinSpeed
+        let detectorFeedDue = lastDetectorFeed.map { $0.age >= 1 } ?? true
+        if !clearlyMovingFast || detectorFeedDue {
+            // stationary detector gets the original raw for invalidVelocity checks
+            await stationaryDetector.add(location: kalmanLocation)
+            await stationaryDetector.addRaw(location: location)
 
-        await sleepModeDetector.add(filteredLocation: kalmanLocation, rawLocation: location)
+            await sleepModeDetector.add(filteredLocation: kalmanLocation, rawLocation: location)
+
+            lastDetectorFeed = .now
+        }
 
         await updateTheRecordingState()
 
