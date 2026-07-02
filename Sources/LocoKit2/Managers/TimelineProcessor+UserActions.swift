@@ -25,7 +25,7 @@ extension TimelineProcessor {
     /// so timeline queries (which filter `disabled = 0`) skip it. The data
     /// stays in the DB for forensic recovery.
     public static func markBogus(itemId: String) async throws {
-        guard var item = try await TimelineItem.fetchItem(itemId: itemId, includeSamples: true) else {
+        guard let item = try await TimelineItem.fetchItem(itemId: itemId, includeSamples: true) else {
             return
         }
 
@@ -41,10 +41,10 @@ extension TimelineProcessor {
             try base.updateChanges(db) {
                 $0.disabled = true
             }
-        }
 
-        // Clear chain links so neighbours can heal across this item next pass.
-        try? await Database.pool.write { db in
+            // Clear chain links so neighbours can heal across this item next
+            // pass. The edge triggers null the reciprocal neighbour links;
+            // same transaction, so the item is never visible disabled-but-linked.
             try db.execute(
                 sql: """
                     UPDATE TimelineItemBase
@@ -54,9 +54,6 @@ extension TimelineProcessor {
                 arguments: [itemId]
             )
         }
-
-        // Force the now-orphaned neighbours to re-heal across the bogus item.
-        await item.fetchSamples(forceFetch: false)
     }
 
     /// Merges an item with a chain-adjacent neighbour. The focused item is the
