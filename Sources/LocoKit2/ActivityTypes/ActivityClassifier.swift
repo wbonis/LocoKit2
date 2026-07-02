@@ -14,7 +14,17 @@ import GRDB
 
 @ActivityTypesActor
 public enum ActivityClassifier {
-    
+
+    // mapmyway: background classification is opt-in. Apps with the `location`
+    // background mode (and CPU/ANE-only inference — see MLModelCache) can run
+    // CoreML in the background; everyone else keeps upstream's foreground-only
+    // behaviour. Flag-gated so upstream syncs can't silently re-disable it.
+    private static var allowsBackgroundClassification = false
+
+    public static func setAllowsBackgroundClassification(_ allowed: Bool) {
+        allowsBackgroundClassification = allowed
+    }
+
     // MARK: - Classifying
 
     public static func canClassify(_ coordinate: CLLocationCoordinate2D? = nil) -> Bool {
@@ -29,9 +39,9 @@ public enum ActivityClassifier {
             return cached
         }
 
-        // mapmyway: classification is allowed in the background.
-        // Apps with the `location` background mode can run CoreML inference;
-        // skipping it here makes periodic background classification impossible.
+        // no Core ML in background plz (unless the app opted in)
+        if !allowsBackgroundClassification,
+           await UIApplication.shared.applicationState == .background { return nil }
 
         // make sure have suitable classifiers
         if let coordinate = sample.location?.coordinate {
@@ -82,7 +92,9 @@ public enum ActivityClassifier {
     public static func results(for samples: [LocomotionSample], timeout: TimeInterval? = nil) async -> (combinedResults: ClassifierResults?, perSampleResults: [String: ClassifierResults])? {
         if samples.isEmpty { return nil }
 
-        // mapmyway: classification is allowed in the background — see results(for:) above.
+        // no Core ML in background plz (unless the app opted in — see results(for:) above)
+        if !allowsBackgroundClassification,
+           await UIApplication.shared.applicationState == .background { return nil }
 
         guard let handle = OperationRegistry.startOperation(
             .activityTypes,
