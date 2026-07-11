@@ -141,6 +141,7 @@ public final class LocomotionManager: @unchecked Sendable {
             backgroundSession = CLBackgroundActivitySession()
         }
 
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
         locationManager.startMonitoringSignificantLocationChanges()
         if useShieldRegime {
@@ -163,11 +164,12 @@ public final class LocomotionManager: @unchecked Sendable {
 
     @MainActor
     public func stopRecording() {
-        print("LocomotionManager.stopRecording()")
-
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.allowsBackgroundLocationUpdates = false
         sleepLocationManager.stopUpdatingLocation()
+        sleepLocationManager.stopMonitoringSignificantLocationChanges()
+        sleepLocationManager.allowsBackgroundLocationUpdates = false
 
         stopCoreMotion()
 
@@ -185,6 +187,7 @@ public final class LocomotionManager: @unchecked Sendable {
 
     @MainActor
     public func startStandby() {
+        sleepLocationManager.allowsBackgroundLocationUpdates = true
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
@@ -683,6 +686,14 @@ public final class LocomotionManager: @unchecked Sendable {
             guard let self else { return }
             Task { await self.endExtendedWakeup() }
         }
+    }
+
+    // MARK: - Accuracy
+
+    /// Updates the active location manager's desired accuracy and distance filter.
+    public func setDesiredAccuracy(_ accuracy: CLLocationAccuracy, distanceFilter: CLLocationDistance) {
+        locationManager.desiredAccuracy = accuracy
+        locationManager.distanceFilter = distanceFilter
     }
 
     // MARK: - Location Managers
