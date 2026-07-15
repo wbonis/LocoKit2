@@ -9,6 +9,7 @@ import Foundation
 import Observation
 import CoreLocation
 import CoreMotion
+import UIKit  // mapmyway: background-relaunch anchor needs applicationState
 
 @Observable
 public final class LocomotionManager: @unchecked Sendable {
@@ -156,6 +157,8 @@ public final class LocomotionManager: @unchecked Sendable {
         }
         lastLocationManagerRestart = .now
 
+        openRelaunchAnchorIfNeeded()  // mapmyway: background-relaunch anchor
+
         startCoreMotion()
 
         restartTheFallbackTimer()
@@ -172,6 +175,8 @@ public final class LocomotionManager: @unchecked Sendable {
         sleepLocationManager.allowsBackgroundLocationUpdates = false
 
         stopCoreMotion()
+
+        closeRelaunchAnchor(reason: "recording stopped")  // mapmyway
 
         stopTheFallbackTimer()
         stopTheWakeupTimer()
@@ -191,6 +196,8 @@ public final class LocomotionManager: @unchecked Sendable {
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
+
+        closeRelaunchAnchor(reason: "standby")  // mapmyway
 
         stopCoreMotion()
 
@@ -306,6 +313,8 @@ public final class LocomotionManager: @unchecked Sendable {
         sleepLocationManager.startUpdatingLocation()
         sleepLocationManager.startMonitoringSignificantLocationChanges()
         locationManager.stopUpdatingLocation()
+
+        closeRelaunchAnchor(reason: "sleeping")  // mapmyway: anchor reached its goal
 
         recordingState = .sleeping
 
@@ -613,6 +622,73 @@ public final class LocomotionManager: @unchecked Sendable {
     private func stopTheFallbackTimer() {
         fallbackUpdateTimer?.invalidate()
         fallbackUpdateTimer = nil
+    }
+
+    // MARK: - Background-relaunch anchor
+
+    // mapmyway: a recording started by an iOS background relaunch must survive
+    // until the sleep anchor (.sleeping) without app help. Field evidence
+    // (15 Jul): RunningBoard exits 562215634 after ~43-53s, exact 5.0-min
+    // relaunch series, kills always before startSleeping(), Powerlog
+    // BackgroundLocationTime = 0. Mechanism: with the device stationary the 3m
+    // distanceFilter suppresses every update after the first fix, iOS credits
+    // no background location time, and RunningBoard reclaims the process at
+    // standard background runtime (~45s). The anchor holds distanceFilter=None
+    // from a background start until .sleeping is reached (or 180s), so the
+    // continuous update stream keeps the process alive long enough for the
+    // shield's permanent keep-alive session to take over. Shield regime only.
+
+    @ObservationIgnored @MainActor
+    private var relaunchAnchorTimer: Timer?
+    @ObservationIgnored @MainActor
+    private var relaunchAnchorRestoreFilter: CLLocationDistance?
+    @ObservationIgnored @MainActor
+    private var relaunchAnchorStart: Date?
+    @ObservationIgnored @MainActor
+    private var relaunchAnchorFired = false  // one-shot per process launch
+
+    private static let relaunchAnchorMaxDuration: TimeInterval = 180
+
+    @MainActor
+    private func openRelaunchAnchorIfNeeded() {
+        guard useShieldRegime else { return }
+        guard UIApplication.shared.applicationState == .background else { return }
+
+        // one-shot: only the cold background relaunch needs establishing. Later
+        // wakeup→recording transitions in a live process already hold the
+        // shield's permanent keep-alive session, and df=None during a long
+        // moving session would be pointless extra load.
+        guard !relaunchAnchorFired else { return }
+        relaunchAnchorFired = true
+
+        relaunchAnchorStart = .now
+        relaunchAnchorRestoreFilter = locationManager.distanceFilter
+        locationManager.distanceFilter = kCLDistanceFilterNone
+
+        Log.info("Background-relaunch anchor opened (df=None until .sleeping, max \(Int(Self.relaunchAnchorMaxDuration))s)", subsystem: .locomotion)
+
+        relaunchAnchorTimer?.invalidate()
+        relaunchAnchorTimer = Timer.scheduledTimer(withTimeInterval: Self.relaunchAnchorMaxDuration, repeats: false) { [weak self] _ in
+            if let self {
+                Task { @MainActor in self.closeRelaunchAnchor(reason: "timeout") }
+            }
+        }
+    }
+
+    @MainActor
+    private func closeRelaunchAnchor(reason: String) {
+        guard let start = relaunchAnchorStart else { return }
+
+        relaunchAnchorTimer?.invalidate()
+        relaunchAnchorTimer = nil
+        relaunchAnchorStart = nil
+
+        if let restoreFilter = relaunchAnchorRestoreFilter {
+            locationManager.distanceFilter = restoreFilter
+            relaunchAnchorRestoreFilter = nil
+        }
+
+        Log.info("Background-relaunch anchor closed (\(reason)) after \(Int(start.age))s", subsystem: .locomotion)
     }
 
     @MainActor
