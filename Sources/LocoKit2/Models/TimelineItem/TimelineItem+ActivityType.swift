@@ -27,6 +27,9 @@ extension TimelineItem {
                         try mutableSample.updateChanges(db) {
                             $0.classifiedActivityType = bestMatch.activityType
                         }
+                        // mapmyway: commit-rate telemetry — counts the post-insert
+                        // re-saves that classify-at-record is meant to eliminate
+                        SampleWriteStats.recordReSave()
                     }
                 }
 

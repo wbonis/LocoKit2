@@ -329,6 +329,19 @@ public enum TimelineRecorder {
 
     private static var lastRecordSampleCall: Date?
 
+    // mapmyway: opt-in classify-at-record (see setClassifiesSamplesOnRecord below)
+    private static var classifiesSamplesOnRecord = false
+
+    /// Opt-in: classify each sample at record time, so `classifiedActivityType`
+    /// persists inside the sample's single insert commit instead of via a later
+    /// per-sample re-save from the classification chain. Halves steady-state WAL
+    /// commits while recording. The consuming app enables this together with
+    /// `ActivityClassifier.setAllowsBackgroundClassification(true)` so background
+    /// recordings classify too. Default off = upstream write behavior.
+    public static func setClassifiesSamplesOnRecord(_ enabled: Bool) {
+        classifiesSamplesOnRecord = enabled
+    }
+
     private static func recordSample() async {
         guard await isRecording else { return }
 
@@ -348,12 +361,28 @@ public enum TimelineRecorder {
             sample.timelineItemId = itemId
         }
 
+        // mapmyway: classify BEFORE the insert (opt-in, same mechanism as the
+        // item decision above) so the classified type rides the insert commit.
+        // The AFTER_INSERT trigger already sets samplesChanged=1, so the item
+        // still reprocesses; the later classification pass sees an unchanged
+        // bestMatch (classifier results are cached per sample id) and skips its
+        // re-save. Returns nil in background unless the app opted in — then the
+        // later pass fills it exactly as before.
+        var preClassified = false
+        if classifiesSamplesOnRecord,
+           let results = await sample.classifierResults,
+           let bestMatch = results.bestMatch {
+            sample.classifiedActivityType = bestMatch.activityType
+            preClassified = true
+        }
+
         do {
             try await Database.pool.write { [sample] in
                 try sample.insert($0)
             }
 
             RecordingStats.incrementSamples()
+            SampleWriteStats.recordInsert(preClassified: preClassified)
 
             if case .newItem(let previousItemId) = destination {
                 let newItemBase = await createTimelineItem(from: sample, previousItemId: previousItemId)
