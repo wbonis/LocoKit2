@@ -26,8 +26,12 @@ public final class BackgroundTaskGuard {
     /// Callable from any context — hops to the main actor itself so call
     /// sites can use it inside a synchronous `defer`.
     public nonisolated func finish() {
-        Task { @MainActor [weak self] in
-            self?.endTask()
+        // Keep the guard alive until the main-actor hop has ended its UIKit
+        // assertion. A weak capture can let `self` disappear immediately after
+        // a caller's `defer` returns, leaving the assertion behind until iOS
+        // eventually kills the app for an expired background task.
+        Task { @MainActor [self] in
+            endTask()
         }
     }
 
