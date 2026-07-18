@@ -645,15 +645,14 @@ public final class LocomotionManager: @unchecked Sendable {
 
     // mapmyway: a recording started by an iOS background relaunch must survive
     // until the sleep anchor (.sleeping) without app help. Field evidence
-    // (15 Jul): RunningBoard exits 562215634 after ~43-53s, exact 5.0-min
-    // relaunch series, kills always before startSleeping(), Powerlog
-    // BackgroundLocationTime = 0. Mechanism: with the device stationary the 3m
-    // distanceFilter suppresses every update after the first fix, iOS credits
-    // no background location time, and RunningBoard reclaims the process at
-    // standard background runtime (~45s). The anchor holds distanceFilter=None
-    // from a background start until .sleeping is reached (or 180s), so the
-    // continuous update stream keeps the process alive long enough for the
-    // shield's permanent keep-alive session to take over. Shield regime only.
+    // (15 Jul / 18 Jul): RunningBoard exits 562215634 after ~43-53s, exact
+    // 5.0-min relaunch series, Powerlog BackgroundLocationTime = 0. Mechanism:
+    // with the device stationary the 3m distanceFilter suppresses every update
+    // after the first fix, iOS credits no background location time, and
+    // RunningBoard reclaims the process. The anchor holds distanceFilter=None
+    // from a background start until .sleeping (or stop/standby). A 180s timeout
+    // that restored df=3 while still on a Trip (canStartSleeping=false) recreated
+    // the kill loop — never restore on timeout. Shield regime only.
 
     @ObservationIgnored @MainActor
     private var relaunchAnchorTimer: Timer?
@@ -664,7 +663,7 @@ public final class LocomotionManager: @unchecked Sendable {
     @ObservationIgnored @MainActor
     private var relaunchAnchorFired = false  // one-shot per process launch
 
-    private static let relaunchAnchorMaxDuration: TimeInterval = 180
+    private static let relaunchAnchorWarnDuration: TimeInterval = 180
 
     @MainActor
     private func openRelaunchAnchorIfNeeded() {
@@ -682,12 +681,19 @@ public final class LocomotionManager: @unchecked Sendable {
         relaunchAnchorRestoreFilter = locationManager.distanceFilter
         locationManager.distanceFilter = kCLDistanceFilterNone
 
-        Log.info("Background-relaunch anchor opened (df=None until .sleeping, max \(Int(Self.relaunchAnchorMaxDuration))s)", subsystem: .locomotion)
+        Log.info("Background-relaunch anchor opened (df=None until .sleeping)", subsystem: .locomotion)
 
+        // Warn-only timer: do NOT restore df=3 here. Sleep / stop / standby close.
         relaunchAnchorTimer?.invalidate()
-        relaunchAnchorTimer = Timer.scheduledTimer(withTimeInterval: Self.relaunchAnchorMaxDuration, repeats: false) { [weak self] _ in
+        relaunchAnchorTimer = Timer.scheduledTimer(withTimeInterval: Self.relaunchAnchorWarnDuration, repeats: false) { [weak self] _ in
             if let self {
-                Task { @MainActor in self.closeRelaunchAnchor(reason: "timeout") }
+                Task { @MainActor in
+                    guard let start = self.relaunchAnchorStart else { return }
+                    Log.info(
+                        "Background-relaunch anchor still open after \(Int(start.age))s (waiting for .sleeping; keeping df=None)",
+                        subsystem: .locomotion
+                    )
+                }
             }
         }
     }
