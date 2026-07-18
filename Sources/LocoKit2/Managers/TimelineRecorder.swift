@@ -351,23 +351,17 @@ public enum TimelineRecorder {
 
         var sample = await loco.createASample()
 
-        // mapmyway: decide the sample's timeline item BEFORE the insert. The hot
-        // path (attach to the current item) then persists in a single commit —
-        // LocomotionSample_AFTER_INSERT_timelineItemId_SET does the item bump —
-        // instead of insert + assignment update, halving WAL commits while
-        // recording. New-item boundaries keep the two-step flow.
+        // mapmyway: decide the sample's timeline item BEFORE the insert.
+        // Attach path: sample carries timelineItemId into a single insert commit
+        // (LocomotionSample_AFTER_INSERT_timelineItemId_SET bumps the item).
+        // New-item path: item + visit/trip + sample in ONE transaction — never
+        // insert an orphan first (field bug 18 Jul: 117 stationary orphans,
+        // visit never formed, trip ran 32h because canStartSleeping needs a visit).
         let destination = await destination(for: sample)
-        if case .attach(let itemId) = destination {
-            sample.timelineItemId = itemId
-        }
 
-        // mapmyway: classify BEFORE the insert (opt-in, same mechanism as the
-        // item decision above) so the classified type rides the insert commit.
-        // The AFTER_INSERT trigger already sets samplesChanged=1, so the item
-        // still reprocesses; the later classification pass sees an unchanged
-        // bestMatch (classifier results are cached per sample id) and skips its
-        // re-save. Returns nil in background unless the app opted in — then the
-        // later pass fills it exactly as before.
+        // mapmyway: classify BEFORE the insert (opt-in) so the classified type
+        // rides the sample's insert commit. Returns nil in background unless
+        // the app opted in — then the later pass fills it exactly as before.
         var preClassified = false
         if classifiesSamplesOnRecord,
            let results = await sample.classifierResults,
@@ -377,17 +371,41 @@ public enum TimelineRecorder {
         }
 
         do {
-            try await Database.pool.write { [sample] in
-                try sample.insert($0)
+            switch destination {
+            case .attach(let itemId):
+                sample.timelineItemId = itemId
+                let toInsert = sample
+                try await Database.pool.write { db in
+                    var s = toInsert
+                    try s.insert(db)
+                }
+                SampleWriteStats.recordInsert(preClassified: preClassified)
+
+            case .newItem(let previousItemId):
+                do {
+                    let newItemId = try await persistNewItem(sample: sample, previousItemId: previousItemId)
+                    currentItemId = newItemId
+                    SampleWriteStats.recordInsert(preClassified: preClassified)
+                } catch {
+                    // Boundary failed (e.g. no usable coordinate for a visit).
+                    // Prefer attaching to the previous item over leaving an orphan
+                    // that adoptOrphanedSamples would later merge into a spanning trip.
+                    Log.error(error, subsystem: .database)
+                    if let previousItemId {
+                        sample.timelineItemId = previousItemId
+                        let toInsert = sample
+                        try await Database.pool.write { db in
+                            var s = toInsert
+                            try s.insert(db)
+                        }
+                        SampleWriteStats.recordInsert(preClassified: preClassified)
+                    } else {
+                        throw error
+                    }
+                }
             }
 
             RecordingStats.incrementSamples()
-            SampleWriteStats.recordInsert(preClassified: preClassified)
-
-            if case .newItem(let previousItemId) = destination {
-                let newItemBase = await createTimelineItem(from: sample, previousItemId: previousItemId)
-                currentItemId = newItemBase.id
-            }
 
             // reset the fallback
             await startFallbackSampleTimer()
@@ -437,39 +455,60 @@ public enum TimelineRecorder {
         return .attach(itemId: workingItem.id)
     }
 
-    private static func createTimelineItem(from sample: LocomotionSample, previousItemId: String? = nil) async -> TimelineItemBase {
-        var newItem = TimelineItemBase(from: sample)
+    private enum PersistNewItemError: Error {
+        case cannotCreateVisitWithoutCoordinate
+    }
 
-        // keep the list linked
+    /// Persists a new timeline item and its seed sample in one WAL transaction.
+    /// Throws if the item detail row cannot be formed (so the caller can fall back).
+    private static func persistNewItem(sample: LocomotionSample, previousItemId: String?) async throws -> String {
+        var newItem = TimelineItemBase(from: sample)
         newItem.previousItemId = previousItemId
 
         let newVisit: TimelineItemVisit?
         let newTrip: TimelineItemTrip?
-        
+
         if newItem.isVisit {
-            newVisit = TimelineItemVisit(itemId: newItem.id, samples: [sample])
+            if let visit = TimelineItemVisit(itemId: newItem.id, samples: [sample]) {
+                newVisit = visit
+            } else if let lat = sample.latitude, let lon = sample.longitude {
+                // mapmyway: weightedCenter can fail on edge samples; still open
+                // the visit so sleep can eventually anchor (canStartSleeping).
+                newVisit = TimelineItemVisit(
+                    itemId: newItem.id,
+                    latitude: lat,
+                    longitude: lon,
+                    radiusMean: TimelineItemVisit.minRadius,
+                    radiusSD: 0
+                )
+                Log.info("Visit created via coordinate fallback (weightedCenter nil)", subsystem: .timeline)
+            } else {
+                throw PersistNewItemError.cannotCreateVisitWithoutCoordinate
+            }
             newTrip = nil
         } else {
             newTrip = TimelineItemTrip(itemId: newItem.id, samples: [sample])
             newVisit = nil
         }
 
-        do {
-            try await Database.pool.write { [newItem, sample] in
-                try newItem.insert($0)
-                try newVisit?.insert($0)
-                try newTrip?.insert($0)
-                var mutableSample = sample
-                try mutableSample.updateChanges($0) {
-                    $0.timelineItemId = newItem.id
-                }
-            }
+        var sampleToInsert = sample
+        sampleToInsert.timelineItemId = newItem.id
 
-        } catch {
-            Log.error(error, subsystem: .database)
+        let item = newItem
+        let visit = newVisit
+        let trip = newTrip
+        let seed = sampleToInsert
+
+        try await Database.pool.write { db in
+            var mutableItem = item
+            try mutableItem.insert(db)
+            try visit?.insert(db)
+            try trip?.insert(db)
+            var mutableSample = seed
+            try mutableSample.insert(db)
         }
 
-        return newItem
+        return item.id
     }
 
     // MARK: - Fallback sample recording
