@@ -26,7 +26,7 @@ extension TimelineProcessor {
 
         Log.info("Found \(orphanCount) orphaned samples (excluding disabled)", subsystem: .timeline)
 
-        // count how many can be adopted into existing items
+        // count how many can be adopted into existing items (type-matched)
         let adoptableCount = try await Database.pool.read { db in
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM LocomotionSample
@@ -38,6 +38,10 @@ extension TimelineProcessor {
                     AND disabled = 0
                     AND startDate <= LocomotionSample.date
                     AND endDate >= LocomotionSample.date
+                    AND isVisit = CASE LocomotionSample.movingState
+                        WHEN 0 THEN 1
+                        ELSE 0
+                    END
                 )
                 """) ?? 0
         }
@@ -49,7 +53,11 @@ extension TimelineProcessor {
             return
         }
 
-        // Step 1: SQL-level adoption into existing items
+        // Step 1: SQL-level adoption into existing items.
+        // mapmyway: only adopt into an item whose isVisit matches the sample's
+        // movingState. Blind date-range adoption poured stationary orphans into
+        // a spanning Trip (18 Jul eternal-trip: 117 orphans → mega-trip, visit
+        // never formed, canStartSleeping stuck false).
         if adoptableCount > 0 {
             let adopted = try await Database.pool.write { db -> Int in
                 try db.execute(sql: """
@@ -60,6 +68,10 @@ extension TimelineProcessor {
                         AND disabled = LocomotionSample.disabled
                         AND startDate <= LocomotionSample.date
                         AND endDate >= LocomotionSample.date
+                        AND isVisit = CASE LocomotionSample.movingState
+                            WHEN 0 THEN 1
+                            ELSE 0
+                        END
                         LIMIT 1
                     )
                     WHERE timelineItemId IS NULL
@@ -69,6 +81,10 @@ extension TimelineProcessor {
                         AND disabled = LocomotionSample.disabled
                         AND startDate <= LocomotionSample.date
                         AND endDate >= LocomotionSample.date
+                        AND isVisit = CASE LocomotionSample.movingState
+                            WHEN 0 THEN 1
+                            ELSE 0
+                        END
                     )
                     """)
                 return db.changesCount
