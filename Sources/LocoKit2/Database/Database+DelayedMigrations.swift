@@ -138,6 +138,14 @@ extension Database {
 
         migrator.registerMigration("LocomotionSample.nullableSecondsFromGMT") { db in
             // BIG-341: Make secondsFromGMT nullable for pre-2019 samples
+            // mapmyway: skip when the column is already nullable. MapMyWay DBs were
+            // created fresh with the current initial schema and run this backlog
+            // late (delayed migrations were unwired until 2026-07-18); rebuilding a
+            // multi-GB sample table at launch for nothing risks watchdog kills.
+            if let column = try? db.columns(in: "LocomotionSample").first(where: { $0.name == "secondsFromGMT" }),
+               !column.isNotNull {
+                return
+            }
             Log.info("Starting LocomotionSample table rebuild (BIG-341)", subsystem: .database)
             let start = Date()
 
@@ -182,14 +190,28 @@ extension Database {
         }
 
         migrator.registerMigration("TimelineItemVisit.nullableCoordinates") { db in
+            // mapmyway: skip when coordinates are already nullable (table was created
+            // by a current initial schema). Running the backlog late made the original
+            // positional INSERT..SELECT fail silently against the wider current table
+            // definition, and the following drop would have erased every visit.
+            if let column = try? db.columns(in: "TimelineItemVisit").first(where: { $0.name == "latitude" }),
+               !column.isNotNull {
+                return
+            }
+
             // recreate table with nullable coordinates and constraint
             try? db.create(table: "TimelineItemVisit_new") { table in
                 Database.defineTimelineItemVisitTable(table)
             }
 
             // copy data, converting null island coordinates to NULL
+            // mapmyway: explicit target columns — defineTimelineItemVisitTable has
+            // grown since this migration shipped (locality, countryCode), so the
+            // positional form no longer matches and the copy silently fails.
             try? db.execute(sql: """
                 INSERT INTO TimelineItemVisit_new
+                (itemId, lastSaved, latitude, longitude, radiusMean, radiusSD,
+                 placeId, confirmedPlace, uncertainPlace, customTitle, streetAddress)
                 SELECT
                     itemId,
                     lastSaved,
@@ -208,6 +230,17 @@ extension Database {
             // drop old table and rename new
             try? db.drop(table: "TimelineItemVisit")
             try? db.rename(table: "TimelineItemVisit_new", to: "TimelineItemVisit")
+
+            // mapmyway: dropping the old table also dropped its lastSaved trigger
+            try? db.execute(sql: """
+                CREATE TRIGGER TimelineItemVisit_AFTER_UPDATE_lastSaved_UNCHANGED
+                AFTER UPDATE ON TimelineItemVisit
+                WHEN NEW.lastSaved IS OLD.lastSaved
+                BEGIN
+                    UPDATE TimelineItemVisit SET lastSaved = CURRENT_TIMESTAMP
+                    WHERE itemId = NEW.itemId;
+                END;
+                """)
         }
 
         migrator.registerMigration("LocomotionSample_lastSaved_index") { db in
