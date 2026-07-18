@@ -156,6 +156,12 @@ public final class LocomotionManager: @unchecked Sendable {
             // hypothesis says the sole-df=3-session state is what cued the suspensions, so keep
             // the compliant session alive through recording mode too. (start is idempotent;
             // also covers cold-launch-straight-into-recording, where no sleep ever started it.)
+            // mapmyway: must arm allowsBackgroundLocationUpdates here too. c56b44f moved
+            // arming off init onto startSleeping/startStandby, but BIG-617 later starts the
+            // sleep manager from this recording path without going through those — leaving
+            // the shield inert in background (field 18 Jul: ~10s Location subscription →
+            // Suspend → locationd.fence ~5 min → multi-km teleports on drives).
+            sleepLocationManager.allowsBackgroundLocationUpdates = true
             sleepLocationManager.startUpdatingLocation()
         } else {
             sleepLocationManager.stopUpdatingLocation()
@@ -875,11 +881,11 @@ public final class LocomotionManager: @unchecked Sendable {
         manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = true
         // allowsBackgroundLocationUpdates is armed dynamically when updates start
-        // — locationManager in startRecording(), sleepLocationManager in
-        // startSleeping()/startStandby() — NOT at init: setting it here asserts in
-        // CoreLocation when the app lacks the `location` background mode, which the
-        // reader-only viewer apps in the MapMyWay split do. They initialise
-        // LocomotionManager.highlander (via AppGroup) but never record.
+        // — locationManager in startRecording()/startWakeup(), sleepLocationManager in
+        // startRecording() (shield keep-alive), startSleeping(), startStandby() — NOT at
+        // init: setting it here asserts in CoreLocation when the app lacks the `location`
+        // background mode, which the reader-only viewer apps in the MapMyWay split do.
+        // They initialise LocomotionManager.highlander (via AppGroup) but never record.
         return manager
     }()
 
