@@ -131,6 +131,13 @@ public final class Database: @unchecked Sendable {
         addEdgeTriggers(to: &migrator)
         addSampleTriggers(to: &migrator)
         addRTreeTriggers(to: &migrator)
+        // mapmyway: upstream leaves delayed migrations for the consuming app to
+        // register (Arc does). MapMyWay never did, so existing DBs missed every
+        // post-creation schema change — BIG-455's locality/countryCode columns
+        // made TimelineItemVisit inserts fail forever (the eternal-trip bug,
+        // 2026-07-18). Registering here covers doMigrations() and the reader
+        // guard's pending-migrations check in one place.
+        addDelayedMigrations(to: &migrator)
     }
 
     // MARK: - URLs
