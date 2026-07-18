@@ -93,8 +93,33 @@ public final class Database: @unchecked Sendable {
         runMigrations()
     }
 
+    /// Registers migrations and runs them off the caller's actor so MainActor
+    /// stays free for scene updates / UI. Prefer this from app startup.
+    public func doMigrationsAsync() async {
+        addMigrations()
+        await runMigrationsAsync()
+    }
+
+    /// Runs already-registered migrations off the caller's actor.
+    /// Caller must have called `addMigrations()` (or `doMigrations*`) first —
+    /// do not call `addMigrations()` again in the same process (GRDB traps).
+    public func runMigrationsAsync() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.runMigrations()
+                cont.resume()
+            }
+        }
+    }
+
     public var havePendingMigrations: Bool {
         !pendingMigrations().isEmpty
+    }
+
+    /// Identifiers not yet applied. Requires migrations registered first
+    /// (`addMigrations()` / `doMigrations*`).
+    public func pendingMigrationIdentifiers() -> [String] {
+        pendingMigrations()
     }
 
     private func pendingMigrations() -> [String] {
